@@ -21,6 +21,8 @@ function New-WouRepository {
     if (-not (Test-Path $computerList)) {
         @('# Add one target computer per line', '# PC001', '# PC002', '# SRV001') | Set-Content -Encoding UTF8 -Path $computerList
     }
+    }
+    $config | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path (Join-Path $Path 'winoffline.config.json')
     return $config
 }
 
@@ -45,7 +47,7 @@ function Get-WouComputerList {
     if ($PSCmdlet.ParameterSetName -eq 'FromConfig') {
         if ($ComputerName) { $names += $ComputerName }
         $cfg = Get-WouConfig -RepositoryRoot $RepositoryRoot
-        $configuredPath = if ($cfg.PSObject.Properties.Name -contains 'ComputerListPath' -and $cfg.ComputerListPath) { $cfg.ComputerListPath } else { 'computers.txt' }
+        $configuredPath = $cfg.ComputerListPath
         if (-not [IO.Path]::IsPathRooted($configuredPath)) { $configuredPath = Join-Path $RepositoryRoot $configuredPath }
         if (Test-Path $configuredPath) { $names += Get-Content -Path $configuredPath }
     } else {
@@ -128,6 +130,11 @@ function Invoke-WouFleetScan {
     $scanScript = Join-Path $PSScriptRoot 'WinOfflineUpdate.psm1'
     $targetComputers = if ($ComputerListPath) { Get-WouComputerList -Path $ComputerListPath -AdditionalComputerName $ComputerName } else { Get-WouComputerList -RepositoryRoot $RepositoryRoot -ComputerName $ComputerName }
     $results = foreach ($computer in $targetComputers) {
+    param([Parameter(Mandatory)][string]$RepositoryRoot,[Parameter(Mandatory)][string[]]$ComputerName,[pscredential]$Credential)
+    $cab = Join-Path $RepositoryRoot 'Catalog\wsusscn2.cab'
+    if (-not (Test-Path $cab)) { throw 'Run Update-WouCatalog on an online transfer host first.' }
+    $scanScript = Join-Path $PSScriptRoot 'WinOfflineUpdate.psm1'
+    $results = foreach ($computer in $ComputerName) {
         $sessionParams = @{ ComputerName = $computer }
         if ($Credential) { $sessionParams.Credential = $Credential }
         $s = New-PSSession @sessionParams
@@ -158,15 +165,7 @@ function Save-WouMissingPackages {
     }
     foreach ($url in ($urls | Sort-Object -Unique)) {
         $name = [IO.Path]::GetFileName(([Uri]$url).AbsolutePath)
-        if (-not $name) {
-            $sha256 = [Security.Cryptography.SHA256]::Create()
-            try {
-                $hash = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($url))
-                $name = ([BitConverter]::ToString($hash) -replace '-', '') + '.bin'
-            } finally {
-                $sha256.Dispose()
-            }
-        }
+        if (-not $name) { $name = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($url))) + '.bin' }
         $target = Join-Path $packageRoot $name
         if (-not (Test-Path $target)) { Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing }
         [pscustomobject]@{ Url = $url; File = $target; AlreadyPresent = (Test-Path $target) }
@@ -180,6 +179,7 @@ function Invoke-WouFleetInstall {
         [Parameter(Mandatory)][string]$RepositoryRoot,
         [string[]]$ComputerName,
         [string]$ComputerListPath,
+        [Parameter(Mandatory)][string[]]$ComputerName,
         [pscredential]$Credential,
         [int]$DeadlineHours,
         [int]$PromptIntervalMinutes
@@ -188,11 +188,10 @@ function Invoke-WouFleetInstall {
     if (-not $PSBoundParameters.ContainsKey('DeadlineHours')) { $DeadlineHours = [int]$cfg.DeadlineHours }
     if (-not $PSBoundParameters.ContainsKey('PromptIntervalMinutes')) { $PromptIntervalMinutes = [int]$cfg.PromptIntervalMinutes }
     $packageRoot = Join-Path $RepositoryRoot 'Packages'
-    $packages = @(Get-ChildItem -Path $packageRoot -File -ErrorAction SilentlyContinue)
-    if (-not $packages) { throw "No update packages found in $packageRoot. Run Save-WouMissingPackages before Invoke-WouFleetInstall." }
     $promptScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\Invoke-WouClientPrompt.ps1'
     $targetComputers = if ($ComputerListPath) { Get-WouComputerList -Path $ComputerListPath -AdditionalComputerName $ComputerName } else { Get-WouComputerList -RepositoryRoot $RepositoryRoot -ComputerName $ComputerName }
     foreach ($computer in $targetComputers) {
+    foreach ($computer in $ComputerName) {
         $sessionParams = @{ ComputerName = $computer }
         if ($Credential) { $sessionParams.Credential = $Credential }
         $s = New-PSSession @sessionParams
@@ -200,7 +199,7 @@ function Invoke-WouFleetInstall {
             Invoke-Command -Session $s -ScriptBlock { New-Item -ItemType Directory -Force -Path 'C:\ProgramData\WinOfflineUpdate\Packages','C:\ProgramData\WinOfflineUpdate\scripts','C:\ProgramData\WinOfflineUpdate\src' | Out-Null }
             Copy-Item -ToSession $s -Path (Join-Path $PSScriptRoot 'WinOfflineUpdate.psm1') -Destination 'C:\ProgramData\WinOfflineUpdate\src\WinOfflineUpdate.psm1' -Force
             Copy-Item -ToSession $s -Path $promptScript -Destination 'C:\ProgramData\WinOfflineUpdate\scripts\Invoke-WouClientPrompt.ps1' -Force
-            Copy-Item -ToSession $s -Path $packages.FullName -Destination 'C:\ProgramData\WinOfflineUpdate\Packages' -Force
+            Copy-Item -ToSession $s -Path (Join-Path $packageRoot '*') -Destination 'C:\ProgramData\WinOfflineUpdate\Packages' -Force
             Invoke-Command -Session $s -ScriptBlock {
                 param($hours,$interval)
                 Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','C:\ProgramData\WinOfflineUpdate\scripts\Invoke-WouClientPrompt.ps1','-PackageDirectory','C:\ProgramData\WinOfflineUpdate\Packages','-Deadline',(Get-Date).AddHours($hours).ToString('o'),'-PromptIntervalMinutes',$interval) -WindowStyle Normal
