@@ -21,6 +21,8 @@ function New-WouRepository {
     if (-not (Test-Path $computerList)) {
         @('# Add one target computer per line', '# PC001', '# PC002', '# SRV001') | Set-Content -Encoding UTF8 -Path $computerList
     }
+    }
+    $config | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path (Join-Path $Path 'winoffline.config.json')
     return $config
 }
 
@@ -128,6 +130,11 @@ function Invoke-WouFleetScan {
     $scanScript = Join-Path $PSScriptRoot 'WinOfflineUpdate.psm1'
     $targetComputers = if ($ComputerListPath) { Get-WouComputerList -Path $ComputerListPath -AdditionalComputerName $ComputerName } else { Get-WouComputerList -RepositoryRoot $RepositoryRoot -ComputerName $ComputerName }
     $results = foreach ($computer in $targetComputers) {
+    param([Parameter(Mandatory)][string]$RepositoryRoot,[Parameter(Mandatory)][string[]]$ComputerName,[pscredential]$Credential)
+    $cab = Join-Path $RepositoryRoot 'Catalog\wsusscn2.cab'
+    if (-not (Test-Path $cab)) { throw 'Run Update-WouCatalog on an online transfer host first.' }
+    $scanScript = Join-Path $PSScriptRoot 'WinOfflineUpdate.psm1'
+    $results = foreach ($computer in $ComputerName) {
         $sessionParams = @{ ComputerName = $computer }
         if ($Credential) { $sessionParams.Credential = $Credential }
         $s = New-PSSession @sessionParams
@@ -172,6 +179,7 @@ function Invoke-WouFleetInstall {
         [Parameter(Mandatory)][string]$RepositoryRoot,
         [string[]]$ComputerName,
         [string]$ComputerListPath,
+        [Parameter(Mandatory)][string[]]$ComputerName,
         [pscredential]$Credential,
         [int]$DeadlineHours,
         [int]$PromptIntervalMinutes
@@ -183,6 +191,7 @@ function Invoke-WouFleetInstall {
     $promptScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\Invoke-WouClientPrompt.ps1'
     $targetComputers = if ($ComputerListPath) { Get-WouComputerList -Path $ComputerListPath -AdditionalComputerName $ComputerName } else { Get-WouComputerList -RepositoryRoot $RepositoryRoot -ComputerName $ComputerName }
     foreach ($computer in $targetComputers) {
+    foreach ($computer in $ComputerName) {
         $sessionParams = @{ ComputerName = $computer }
         if ($Credential) { $sessionParams.Credential = $Credential }
         $s = New-PSSession @sessionParams
