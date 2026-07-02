@@ -14,6 +14,13 @@ function New-WouRepository {
         PromptIntervalMinutes = 60
         RebootPolicy = 'Prompt'
         Products = @('Windows 10','Windows 11','Windows Server 2019','Windows Server 2022','Windows Server 2025')
+        ComputerListPath = 'computers.txt'
+    }
+    $config | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path (Join-Path $Path 'winoffline.config.json')
+    $computerList = Join-Path $Path $config.ComputerListPath
+    if (-not (Test-Path $computerList)) {
+        @('# Add one target computer per line', '# PC001', '# PC002', '# SRV001') | Set-Content -Encoding UTF8 -Path $computerList
+    }
     }
     $config | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -Path (Join-Path $Path 'winoffline.config.json')
     return $config
@@ -25,6 +32,36 @@ function Get-WouConfig {
     $path = Join-Path $RepositoryRoot 'winoffline.config.json'
     if (-not (Test-Path $path)) { throw "Repository config not found: $path" }
     Get-Content -Raw -Path $path | ConvertFrom-Json
+}
+
+
+function Get-WouComputerList {
+    [CmdletBinding(DefaultParameterSetName = 'FromConfig')]
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'FromConfig')][string]$RepositoryRoot,
+        [Parameter(Mandatory, ParameterSetName = 'FromFile')][string]$Path,
+        [Parameter(ParameterSetName = 'FromConfig')][string[]]$ComputerName,
+        [Parameter(ParameterSetName = 'FromFile')][string[]]$AdditionalComputerName
+    )
+    $names = @()
+    if ($PSCmdlet.ParameterSetName -eq 'FromConfig') {
+        if ($ComputerName) { $names += $ComputerName }
+        $cfg = Get-WouConfig -RepositoryRoot $RepositoryRoot
+        $configuredPath = $cfg.ComputerListPath
+        if (-not [IO.Path]::IsPathRooted($configuredPath)) { $configuredPath = Join-Path $RepositoryRoot $configuredPath }
+        if (Test-Path $configuredPath) { $names += Get-Content -Path $configuredPath }
+    } else {
+        if (Test-Path $Path) { $names += Get-Content -Path $Path } else { throw "Computer list not found: $Path" }
+        if ($AdditionalComputerName) { $names += $AdditionalComputerName }
+    }
+
+    $normalized = $names |
+        ForEach-Object { if ($_ -ne $null) { $_.ToString().Trim() } } |
+        Where-Object { $_ -and -not $_.StartsWith('#') } |
+        Sort-Object -Unique
+
+    if (-not $normalized) { throw 'No computers were supplied. Add names to computers.txt or pass -ComputerName.' }
+    return @($normalized)
 }
 
 function Update-WouCatalog {
@@ -87,6 +124,12 @@ function Invoke-WouClientScan {
 
 function Invoke-WouFleetScan {
     [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RepositoryRoot,[string[]]$ComputerName,[string]$ComputerListPath,[pscredential]$Credential)
+    $cab = Join-Path $RepositoryRoot 'Catalog\wsusscn2.cab'
+    if (-not (Test-Path $cab)) { throw 'Run Update-WouCatalog on an online transfer host first.' }
+    $scanScript = Join-Path $PSScriptRoot 'WinOfflineUpdate.psm1'
+    $targetComputers = if ($ComputerListPath) { Get-WouComputerList -Path $ComputerListPath -AdditionalComputerName $ComputerName } else { Get-WouComputerList -RepositoryRoot $RepositoryRoot -ComputerName $ComputerName }
+    $results = foreach ($computer in $targetComputers) {
     param([Parameter(Mandatory)][string]$RepositoryRoot,[Parameter(Mandatory)][string[]]$ComputerName,[pscredential]$Credential)
     $cab = Join-Path $RepositoryRoot 'Catalog\wsusscn2.cab'
     if (-not (Test-Path $cab)) { throw 'Run Update-WouCatalog on an online transfer host first.' }
@@ -134,6 +177,8 @@ function Invoke-WouFleetInstall {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RepositoryRoot,
+        [string[]]$ComputerName,
+        [string]$ComputerListPath,
         [Parameter(Mandatory)][string[]]$ComputerName,
         [pscredential]$Credential,
         [int]$DeadlineHours,
@@ -144,6 +189,8 @@ function Invoke-WouFleetInstall {
     if (-not $PSBoundParameters.ContainsKey('PromptIntervalMinutes')) { $PromptIntervalMinutes = [int]$cfg.PromptIntervalMinutes }
     $packageRoot = Join-Path $RepositoryRoot 'Packages'
     $promptScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'scripts\Invoke-WouClientPrompt.ps1'
+    $targetComputers = if ($ComputerListPath) { Get-WouComputerList -Path $ComputerListPath -AdditionalComputerName $ComputerName } else { Get-WouComputerList -RepositoryRoot $RepositoryRoot -ComputerName $ComputerName }
+    foreach ($computer in $targetComputers) {
     foreach ($computer in $ComputerName) {
         $sessionParams = @{ ComputerName = $computer }
         if ($Credential) { $sessionParams.Credential = $Credential }
