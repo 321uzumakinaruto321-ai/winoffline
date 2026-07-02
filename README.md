@@ -1,46 +1,144 @@
 # WinOfflineUpdate
 
-WinOfflineUpdate is a PowerShell-based starter implementation for centrally managing Windows updates in a closed network without WSUS. It uses WinRM for remote access, the Microsoft offline scan catalog (`wsusscn2.cab`) for missing-update detection, and a repository layout that deduplicates update payload downloads.
+WinOfflineUpdate is a PowerShell starter project for centrally scanning, downloading, deduplicating, reporting, and deploying Windows updates in a closed network without WSUS. It is designed around a portable repository that is moved between an internet-connected transfer host and the closed-network central server.
 
 ## Supported targets
 
-Designed for Windows 10 1909+, Windows 11, Windows Server 2019, Windows Server 2022, and Windows Server 2025 where PowerShell remoting/WinRM is enabled and the operator has local administrator rights on clients.
+- Windows 10 1909 and later
+- Windows 11
+- Windows Server 2019
+- Windows Server 2022
+- Windows Server 2025
 
-## Workflow
+Client requirements:
 
-1. On an internet-connected transfer host, create a repository and download the latest offline scan catalog automatically:
-   ```powershell
-   Import-Module .\src\WinOfflineUpdate.psm1
-   New-WouRepository -Path D:\WouRepo
-   Update-WouCatalog -RepositoryRoot D:\WouRepo
-   Set-Content -Path D:\WouRepo\computers.txt -Value @('PC001','PC002','SRV001')
-   ```
-2. Move the repository to the closed-network central server.
-3. Scan clients from the central server:
-   ```powershell
-   Invoke-WouFleetScan -RepositoryRoot D:\WouRepo
-   New-WouReport -RepositoryRoot D:\WouRepo
-   ```
-4. Move only the repository metadata back to the online transfer host and download unique missing update packages once:
-   ```powershell
-   Save-WouMissingPackages -RepositoryRoot D:\WouRepo
-   ```
-5. Move the repository back to the closed-network server and deploy packages with WinRM. The included prompt script gives users defer/deadline choices without using Task Scheduler:
-   ```powershell
-   Invoke-WouFleetInstall -RepositoryRoot D:\WouRepo -DeadlineHours 24 -PromptIntervalMinutes 60
-   ```
+- WinRM/PowerShell Remoting enabled from the central server to clients.
+- Operator account has local administrator rights on clients.
+- Windows Update Agent COM components are available on clients.
+- Update package installation tools are present on clients (`wusa.exe`, `dism.exe`, `msiexec.exe`, or the package's silent `.exe` installer).
 
-## Computer list format
+## Repository layout
 
-By default, fleet commands read target computers from `computers.txt` in the repository root, which `New-WouRepository` creates as a template. Add one computer name per line; blank lines and lines beginning with `#` are ignored. You can override the file with `-ComputerListPath` or append ad-hoc names with `-ComputerName`. See `computers.example.txt` for the same format.
+`New-WouRepository` creates this portable structure:
 
-## What is included
+| Path | Purpose |
+| --- | --- |
+| `Catalog/wsusscn2.cab` | Microsoft offline scan catalog downloaded on the online transfer host. |
+| `Metadata/*.scan.json` | Per-computer missing-update scan output collected from the closed network. |
+| `Packages/` | Downloaded update payloads. A payload URL is downloaded only once even if many computers need it. |
+| `Reports/` | CSV reports generated from scan metadata. |
+| `ClientPayload/` | Reserved for future client-side payload packaging. |
+| `Logs/` | Reserved for operational logs. |
+| `computers.txt` | Default target computer list. One computer per line; blank lines and lines starting with `#` are ignored. |
+| `winoffline.config.json` | Repository configuration, including catalog URL, prompt deadline defaults, and computer-list path. |
 
-- `src/WinOfflineUpdate.psm1`: repository creation, catalog download, offline client scan, fleet scan over WinRM, unique package download, WinRM deployment, CSV missing-update report, and package install helpers.
-- `scripts/Invoke-WouClientPrompt.ps1`: interactive client prompt loop with a deadline and installation result JSON output.
+## Computer list
+
+Fleet commands read target computers from the repository's `computers.txt` by default. Create or edit it like this:
+
+```powershell
+Set-Content -Path D:\WouRepo\computers.txt -Value @(
+    'PC001'
+    'PC002'
+    'SRV001'
+)
+```
+
+You can also pass a custom list file with `-ComputerListPath`, or add temporary extra targets with `-ComputerName`:
+
+```powershell
+Invoke-WouFleetScan -RepositoryRoot D:\WouRepo -ComputerListPath D:\Targets\pilot.txt
+Invoke-WouFleetInstall -RepositoryRoot D:\WouRepo -ComputerName TEST-PC01
+```
+
+See `computers.example.txt` for the expected format.
+
+## End-to-end workflow
+
+### 1. Prepare the repository on an online transfer host
+
+```powershell
+Import-Module .\src\WinOfflineUpdate.psm1
+New-WouRepository -Path D:\WouRepo
+Update-WouCatalog -RepositoryRoot D:\WouRepo
+Set-Content -Path D:\WouRepo\computers.txt -Value @('PC001','PC002','SRV001')
+```
+
+`Update-WouCatalog` downloads the latest Microsoft offline scan catalog automatically; there is no manual database download step.
+
+### 2. Move the repository to the closed-network central server
+
+Copy the full `D:\WouRepo` folder to the central server in the closed network.
+
+### 3. Scan clients from the central server
+
+```powershell
+Import-Module .\src\WinOfflineUpdate.psm1
+Invoke-WouFleetScan -RepositoryRoot D:\WouRepo
+New-WouReport -RepositoryRoot D:\WouRepo
+```
+
+The scan uses WinRM to copy the catalog and module to each listed computer, runs an offline Windows Update Agent scan, and stores each result under `Metadata/<computer>.scan.json`.
+
+### 4. Download missing packages once on the online transfer host
+
+Move the repository metadata back to the online transfer host, then run:
+
+```powershell
+Import-Module .\src\WinOfflineUpdate.psm1
+Save-WouMissingPackages -RepositoryRoot D:\WouRepo
+```
+
+`Save-WouMissingPackages` reads all scan metadata, extracts unique update download URLs, and saves each payload once under `Packages/`.
+
+### 5. Deploy and install in the closed network
+
+Move the repository back to the central server, then run:
+
+```powershell
+Import-Module .\src\WinOfflineUpdate.psm1
+Invoke-WouFleetInstall -RepositoryRoot D:\WouRepo -DeadlineHours 24 -PromptIntervalMinutes 60
+```
+
+The deployment command copies the module, prompt script, and downloaded packages to each target over WinRM and starts the client prompt process.
+
+## User defer/deadline behavior
+
+`scripts/Invoke-WouClientPrompt.ps1` displays an interactive prompt on the client. The user can defer until the configured deadline. When the deadline is reached, installation proceeds without using Task Scheduler. Installation results are written to `install-results.json` in the client package directory.
+
+## Reporting
+
+`New-WouReport` creates a CSV under `Reports/` with these fields:
+
+- Computer name
+- OS caption
+- Scan time
+- KB IDs
+- Update title
+- Update ID
+- MSRC severity
+- Download URL count
+
+The client prompt also records per-package install status, exit code, success flag, timestamp, and errors when a package fails.
+
+## Module commands
+
+| Command | Description |
+| --- | --- |
+| `New-WouRepository` | Creates the portable repository, default config, and `computers.txt` template. |
+| `Get-WouConfig` | Reads `winoffline.config.json`. |
+| `Get-WouComputerList` | Reads and normalizes computer names from `computers.txt`, a custom file, and optional extra names. |
+| `Update-WouCatalog` | Downloads `wsusscn2.cab` from Microsoft. |
+| `Invoke-WouClientScan` | Runs a local offline scan with the catalog. |
+| `Invoke-WouFleetScan` | Scans all listed computers over WinRM. |
+| `Save-WouMissingPackages` | Downloads unique missing update package URLs once. |
+| `Invoke-WouFleetInstall` | Copies packages to listed computers and starts the defer/deadline prompt. |
+| `New-WouReport` | Exports a missing-update CSV report. |
+| `Install-WouPackageFile` | Installs `.msu`, `.cab`, `.msi`, or silent `.exe` packages. |
 
 ## Notes and limitations
 
 - `wsusscn2.cab` supports offline security update detection. It is not a full WSUS replacement and may not cover every driver, feature update, or Microsoft product update.
-- Update installation order, supersedence cleanup, reboot orchestration, and a web/desktop UI are intentionally left as next implementation steps.
-- The PSWindowsUpdate module can be added later for online Windows Update Agent operations, but this project does not require manual database download steps.
+- Update ordering, supersedence cleanup, reboot orchestration, package-to-host targeting, and web/desktop UI features are future improvements.
+- The current deployment helper copies the downloaded package set to each target. A future version should map only the packages required by each computer.
+- The PSWindowsUpdate module can be integrated later for additional Windows Update Agent operations, but this project does not require users to manually download a database.
