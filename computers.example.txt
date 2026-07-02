@@ -1,0 +1,4 @@
+# Add one target computer per line
+PC001
+PC002
+SRV001
